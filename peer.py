@@ -216,6 +216,7 @@ class Peer:
                 #self.markers_seen.append(new_marker)
                 seen_from = message_dict['sender']
                 print("Seen new marker request from {}".format(seen_from))
+
                 #self.need_mark_reply.remove(seen_from)
                 self.initiate_snapsot(new_marker, seen_from)
 
@@ -224,7 +225,8 @@ class Peer:
 
     def initiate_snapsot(self, marker, seen_from = None):
         '''
-
+        Initiates a snapshot request, or responds to a snapshot request
+        by forwarding the marker onto all channels.
 
         :return:
         :rtype:
@@ -239,6 +241,11 @@ class Peer:
         if current_snapsot not in self.active_snapshots.keys():
             self.active_snapshots[current_snapsot] = current_snapsot
 
+        #If peer recieves snapshot request, it must log that incoming
+        #channel as empty
+        if seen_from:
+            self.active_snapshots[current_snapsot].reg_recieve(seen_from, 0)
+
         #Initialize need replies dict
         self.markers_seen[marker] = []
 
@@ -248,13 +255,11 @@ class Peer:
         peers.remove(socket.getfqdn())
 
         if seen_from:
-
             #Update whom we need to see a reply from
             need_mark_reply = peers.copy()
             need_mark_reply.remove(seen_from)
             #Create list for this particular marker
             self.markers_seen[marker] = need_mark_reply
-
         else:
             need_mark_reply = peers.copy()
             self.markers_seen[marker] = need_mark_reply
@@ -276,8 +281,6 @@ class Peer:
 
 
 
-
-
     def handle_update_snapshot(self, message_dict):
         '''
         Updates the snapshot with buffer values
@@ -293,6 +296,7 @@ class Peer:
 
         if sender in self.markers_seen[marker]:
             self.markers_seen[marker].remove(sender)
+
         print("Seen marker from {}".format(sender))
         print("Now need to see reply from {}".format(self.markers_seen[marker]))
 
@@ -303,9 +307,6 @@ class Peer:
             print(current_snapshot)
             self.snapshot_history[current_snapshot] = current_snapshot
             self.markers_seen.pop(marker)
-
-
-
 
 
 
@@ -380,14 +381,30 @@ class Peer:
         else:
             print("{} does not have any money".format(socket.getfqdn()))
 
+
+def produce_snapshots_every_two_seconds(peer):
+    '''
+    Makes a snapshot request every two seconds.
+    :param peer: Our peer
+    :type peer: Peer
+    :return: None
+    :rtype:
+    '''
+
+    while True:
+        marker = Marker()
+        peer.initiate_snapsot(marker)
+        time.sleep(2)
+
+
 if __name__ == '__main__':
     peer = Peer()
     while True:
         n = input()
         if n == '1':
-            marker = Marker()
-            thread = threading.Thread(target=peer.initiate_snapsot, args = [marker], daemon= True)
+            thread = threading.Thread(target = produce_snapshots_every_two_seconds, args = [peer], daemon = True)
             thread.start()
+
 
 
 
