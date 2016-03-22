@@ -5,6 +5,9 @@ import random
 import threading
 import uuid
 
+
+
+
 class Snapshot:
     '''
     A Snapshot object. Contains state information
@@ -28,7 +31,7 @@ class Snapshot:
         string =  "Snapshot {}".format(str(self.id))
         string += "\n Balance : {}".format(self.peer_state)
         for k,v in self.recv_buffers.items():
-            string += "{} <--- {} : {} ".format(socket.getfqdn(), str(k), str(v))
+            string += " \n {} <--- {} : {} ".format(socket.getfqdn(), str(k), str(v))
         return string
 
 
@@ -48,6 +51,7 @@ class Snapshot:
             self.recv_buffers[peer_name].append(request)
         else:
             self.recv_buffers[peer_name].append(request)
+
     def __hash__(self):
         return hash(self.id)
 
@@ -124,12 +128,14 @@ class Peer:
 
         #A dictionary mapping a marker to the list of peers who will
         #reply to the same.
+        self.markers_seen_lock = threading.Lock()
         self.markers_seen = {}
 
         #To store completed snapshots
         self.snapshot_history = {}
 
         #To store currrently active snapshots
+        self.active_snapshots_lock = threading.Lock()
         self.active_snapshots = {}
         self.current_snapshot = None
         self.previous_snapshot = None
@@ -185,13 +191,13 @@ class Peer:
         if request == 'DEPM':
 
             if self.active_snapshots:
-
                 sender =    message_dict['sender']
+                amount = message_dict['amount']
                 #print("Money recieved from: {}".format(sender))
+
                 #Update channel state for all active snapshots
-                for snapshot in self.active_snapshots.keys():
-                    print("Update snapshot state for {}".format(snapshot))
-                    self.active_snapshots[snapshot].reg_recieve(sender, message_dict['amount'])
+                thread = threading.Thread(target = self.register_deposit_to_snapsot, args=[amount, sender], daemon=True)
+                thread.start()
 
                 #Deposit money to balance
                 self.deposit_money(message_dict)
@@ -207,19 +213,52 @@ class Peer:
 
             new_marker = Marker(message_dict)
 
-            #If we havent seen the marker before
-            if new_marker in self.markers_seen:
+            try:
+                #Obtain Locks
+                self.active_snapshots_lock.acquire()
+                self.markers_seen_lock.acquire()
 
-                self.handle_update_snapshot(message_dict)
+                #If we havent seen the marker before
+                if new_marker in self.markers_seen:
 
-            else:
-                #self.markers_seen.append(new_marker)
-                seen_from = message_dict['sender']
-                print("Seen new marker request from {}".format(seen_from))
+                    self.handle_update_snapshot(message_dict)
 
-                #self.need_mark_reply.remove(seen_from)
-                self.initiate_snapsot(new_marker, seen_from)
+                else:
+                    #self.markers_seen.append(new_marker)
+                    seen_from = message_dict['sender']
+                    print("Seen new marker request from {}".format(seen_from))
 
+                    #self.need_mark_reply.remove(seen_from)
+                    self.initiate_snapsot(new_marker, seen_from)
+            finally:
+                #Release Locks
+                self.markers_seen_lock.release()
+                self.active_snapshots_lock.release()
+
+
+    def register_deposit_to_snapsot(self, amount, sender):
+        '''
+        Registers a deposit for a snapshot as the state of thr
+        incoming channel on which it was recieved.
+        :param amount: Deposit amount
+        :type amount: Integer
+        :param sender: Sender from which amount was recieved.
+        :type sender: fqdn
+        :return: None
+        :rtype: None
+        '''
+
+        try:
+            #acquire locks
+            self.active_snapshots_lock.acquire()
+
+            for snapshot in self.active_snapshots.keys():
+                print("Update snapshot state for {}".format(snapshot))
+                self.active_snapshots[snapshot].reg_recieve(sender, amount)
+
+
+        finally:
+            self.active_snapshots_lock.release()
 
 
 
