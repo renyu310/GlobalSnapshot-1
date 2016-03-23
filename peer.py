@@ -253,9 +253,8 @@ class Peer:
             self.active_snapshots_lock.acquire()
 
             for snapshot in self.active_snapshots.keys():
-                print("Update snapshot state for {}".format(snapshot))
                 self.active_snapshots[snapshot].reg_recieve(sender, amount)
-
+                print("Update snapshot state for {}".format(snapshot))
 
         finally:
             self.active_snapshots_lock.release()
@@ -307,16 +306,30 @@ class Peer:
         #Forward Marker to all peers
         for peer in peers:
 
-            send_dict = {'request':'MRKR', 'message':{
+            if not peer == "hendrix.cs.rit.edu":
+                send_dict = {'request':'MRKR', 'message':{
                 'sender':socket.getfqdn(),
                 'id':marker.id,
                 'initiator':marker.initiator
-            }}
-            send_blob = json.dumps(send_dict).encode()
-            send_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            print("Sending marker to {}".format(peer))
-            send_sock.connect((peer,self.PORT))
-            send_sock.send(send_blob)
+                }}
+                send_blob = json.dumps(send_dict).encode()
+                send_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                print("Sending marker to {}".format(peer))
+                send_sock.connect((peer,self.PORT))
+                send_sock.send(send_blob)
+
+            else:
+                time.sleep(1)
+                send_dict = {'request':'MRKR', 'message':{
+                    'sender':socket.getfqdn(),
+                    'id':marker.id,
+                    'initiator':marker.initiator
+                }}
+                send_blob = json.dumps(send_dict).encode()
+                send_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                print("Sending marker to {}".format(peer))
+                send_sock.connect((peer,self.PORT))
+                send_sock.send(send_blob)
 
 
 
