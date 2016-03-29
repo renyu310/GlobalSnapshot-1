@@ -1,12 +1,14 @@
 import json
-import time
+import threading
 import socket
 import random
-import threading
+import time
 import uuid
+import sys
 
-
-
+def coin_toss():
+    result = random.randint(0,100)%2
+    return result == 0
 
 class Snapshot:
     '''
@@ -17,11 +19,17 @@ class Snapshot:
     peer.
     '''
 
-    def __init__(self, marker, peer_state = 0):
+    def __init__(self, marker, peer_state = 0, otherpeerlist = None,):
 
         self.id = marker.id
+        self.otherpeerlist = otherpeerlist
         self.peer_state = peer_state
         self.recv_buffers = {}
+        self.recv_buffers_state = {}
+        if self.otherpeerlist:
+            print("Other peer is ".format(self.otherpeerlist))
+            self.init_channel_states()
+
         self.initiator = marker.initiator
 
     def __eq__(self, other):
@@ -33,6 +41,17 @@ class Snapshot:
         for k,v in self.recv_buffers.items():
             string += " \n {} <--- {} : {} ".format(socket.getfqdn(), str(k), str(v))
         return string
+
+    def init_channel_states(self):
+        for peer in self.otherpeerlist:
+            self.recv_buffers_state[peer] = False
+
+    def reg_recording(self, peer):
+        self.recv_buffers_state[peer] = True
+
+    def de_reg_recording(self, peer):
+        self.recv_buffers_state[peer] = False
+
 
 
 
@@ -47,10 +66,16 @@ class Snapshot:
         '''
 
         if peer_name not in self.recv_buffers.keys():
-            self.recv_buffers[peer_name] = []
-            self.recv_buffers[peer_name].append(request)
+            if self.recv_buffers_state[peer_name] :
+                self.recv_buffers[peer_name] = []
+                self.recv_buffers[peer_name].append(request)
+            else:
+                pass
         else:
-            self.recv_buffers[peer_name].append(request)
+            if self.recv_buffers_state[peer_name]:
+                self.recv_buffers[peer_name].append(request)
+            else:
+                pass
 
     def __hash__(self):
         return hash(self.id)
@@ -124,7 +149,7 @@ class Peer:
                           'doors.cs.rit.edu':[],
                           'glados.cs.rit.edu':[]
                           }
-
+        self.balance_lock = threading.Lock()
 
         #A dictionary mapping a marker to the list of peers who will
         #reply to the same.
@@ -153,7 +178,10 @@ class Peer:
         thread_send_money.start()
 
 
-
+    def get_other_peers(self):
+        peers = list(self.PEER_LIST.keys())
+        peers.remove(socket.getfqdn())
+        return peers
 
     def accept_connections(self,listener):
         '''
@@ -213,33 +241,30 @@ class Peer:
 
             new_marker = Marker(message_dict)
 
-            try:
-                #Obtain Locks
-                self.active_snapshots_lock.acquire()
-                self.markers_seen_lock.acquire()
+            #If we have seen the marker before
+            if new_marker in self.markers_seen:
 
-                #If we havent seen the marker before
-                if new_marker in self.markers_seen:
+                self.handle_update_snapshot(message_dict)
 
-                    self.handle_update_snapshot(message_dict)
+            else:
 
-                else:
-                    #self.markers_seen.append(new_marker)
-                    seen_from = message_dict['sender']
-                    print("Seen new marker request from {}".format(seen_from))
+                #self.markers_seen.append(new_marker)
+                seen_from = message_dict['sender']
+                #print("Seen new marker request from {}".format(seen_from))
+                #self.need_mark_reply.remove(seen_from)
+                self.initiate_snapsot(new_marker, seen_from)
+        
+        elif request == 'EXIT':
+            print("Exiting...")
+            sys.exit()
 
-                    #self.need_mark_reply.remove(seen_from)
-                    self.initiate_snapsot(new_marker, seen_from)
-            finally:
-                #Release Locks
-                self.markers_seen_lock.release()
-                self.active_snapshots_lock.release()
 
 
     def register_deposit_to_snapsot(self, amount, sender):
         '''
         Registers a deposit for a snapshot as the state of thr
         incoming channel on which it was recieved.
+
         :param amount: Deposit amount
         :type amount: Integer
         :param sender: Sender from which amount was recieved.
@@ -254,7 +279,7 @@ class Peer:
 
             for snapshot in self.active_snapshots.keys():
                 self.active_snapshots[snapshot].reg_recieve(sender, amount)
-                print("Update snapshot state for {}".format(snapshot))
+                #print("Update snapshot state for {}".format(snapshot))
 
         finally:
             self.active_snapshots_lock.release()
@@ -272,64 +297,91 @@ class Peer:
 
         print("Initiating Snapshot on {}".format(socket.getfqdn()))
 
-        current_snapsot  = Snapshot(marker,self.BALANCE)
 
-        #If the current snapshot isn't in the active snapshot dict
-        #add it
+
+        current_snapsot  = Snapshot(marker,self.BALANCE, self.get_other_peers())
+
+
+
+        # If the current snapshot isn't in the active snapshot dict
+        # add it
+        self.active_snapshots_lock.acquire()
+
         if current_snapsot not in self.active_snapshots.keys():
             self.active_snapshots[current_snapsot] = current_snapsot
 
-        #If peer recieves snapshot request, it must log that incoming
-        #channel as empty
+        # If peer recieves snapshot request, it must log that incoming
+        # channel as empty
         if seen_from:
+            self.active_snapshots[current_snapsot].reg_recording(seen_from)
             self.active_snapshots[current_snapsot].reg_recieve(seen_from, 0)
+            self.active_snapshots[current_snapsot].de_reg_recording(seen_from)
 
-        #Initialize need replies dict
+
+        self.active_snapshots_lock.release()
+
+
+
+        self.markers_seen_lock.acquire()
+        # Initialize need replies dict
         self.markers_seen[marker] = []
 
         peers = list(self.PEER_LIST.keys())
 
-        #Remove oneself from peerlist
+        # Remove oneself from peerlist
         peers.remove(socket.getfqdn())
 
         if seen_from:
             #Update whom we need to see a reply from
             need_mark_reply = peers.copy()
             need_mark_reply.remove(seen_from)
+
+            #start recording all other channels
+            self.active_snapshots_lock.acquire()
+            for peer in need_mark_reply:
+                self.active_snapshots[current_snapsot].reg_recording(peer)
+
+            self.active_snapshots_lock.release()
+
             #Create list for this particular marker
             self.markers_seen[marker] = need_mark_reply
         else:
             need_mark_reply = peers.copy()
+
+            #start recording all other channels
+            self.active_snapshots_lock.acquire()
+            for peer in need_mark_reply:
+                self.active_snapshots[current_snapsot].reg_recording(peer)
+
+            self.active_snapshots_lock.release()
+
             self.markers_seen[marker] = need_mark_reply
+
+        self.markers_seen_lock.release()
+
+
 
 
         #Forward Marker to all peers
         for peer in peers:
 
-            if not peer == "hendrix.cs.rit.edu":
-                send_dict = {'request':'MRKR', 'message':{
-                'sender':socket.getfqdn(),
-                'id':marker.id,
-                'initiator':marker.initiator
-                }}
-                send_blob = json.dumps(send_dict).encode()
-                send_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                print("Sending marker to {}".format(peer))
-                send_sock.connect((peer,self.PORT))
-                send_sock.send(send_blob)
 
-            else:
-                time.sleep(1)
-                send_dict = {'request':'MRKR', 'message':{
-                    'sender':socket.getfqdn(),
-                    'id':marker.id,
-                    'initiator':marker.initiator
-                }}
-                send_blob = json.dumps(send_dict).encode()
-                send_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                print("Sending marker to {}".format(peer))
-                send_sock.connect((peer,self.PORT))
-                send_sock.send(send_blob)
+            send_dict = {'request':'MRKR', 'message':{
+            'sender':socket.getfqdn(),
+            'id':marker.id,
+            'initiator':marker.initiator
+            }}
+            send_blob = json.dumps(send_dict).encode()
+            send_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            print("Sending marker to {}".format(peer))
+
+
+            send_sock.connect((peer,self.PORT))
+                              
+                              
+            send_sock.send(send_blob)
+
+
 
 
 
@@ -346,21 +398,37 @@ class Peer:
         sender = message_dict['sender']
         marker = Marker(message_dict)
 
+        self.markers_seen_lock.acquire()
+
         if sender in self.markers_seen[marker]:
+
             self.markers_seen[marker].remove(sender)
 
-        print("Seen marker from {}".format(sender))
-        print("Now need to see reply from {}".format(self.markers_seen[marker]))
+            self.active_snapshots_lock.acquire()
+            snapshot = Snapshot(marker)
+            self.active_snapshots[snapshot].de_reg_recording(sender)
+            self.active_snapshots_lock.release()
+
+        #print("Seen marker from {}".format(sender))
+        #print("Now need to see reply from {}".format(self.markers_seen[marker]))
 
         if not self.markers_seen[marker]:
             snapshot= Snapshot(marker)
+
+            self.active_snapshots_lock.acquire()
+            self.active_snapshots[snapshot].de_reg_recording(sender)
             current_snapshot = self.active_snapshots.pop(snapshot)
+
+            self.active_snapshots_lock.release()
+            
+            print("******************************")
             print("Now done snaphot:")
             print(current_snapshot)
+            print("******************************")
             self.snapshot_history[current_snapshot] = current_snapshot
             self.markers_seen.pop(marker)
 
-
+        self.markers_seen_lock.release()
 
 
 
@@ -390,12 +458,31 @@ class Peer:
         '''
 
         amount = message_dict['amount']
+        sender = message_dict['sender']
+        self.balance_lock.acquire()
         self.BALANCE += amount
-        #print("Updated balance : {}".format(self.BALANCE))
+        self.balance_lock.release()
+        str1 = "Recieved {} from {}".format(amount, sender)
+        str2 = "Now Balance : {}".format(self.BALANCE)
+        print("{:<50} \t {:<20}".format(str1, str2))
 
-
-
-
+    
+    def send_exit(self):
+        '''
+        Sends an exit message to all peers 
+        in the Peer List
+        '''
+        
+        peers = list(self.PEER_LIST.keys())
+        peers.remove(socket.getfqdn())
+        request_dict = {'request':'EXIT',
+                        'message':{}}
+        request_blob = request_dict.encode()
+        
+        for peer in peers:
+            send_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            send_sock.conect((peer, self.PORT))
+            send_sock.send(request_blob)
 
 
     def send_money(self):
@@ -407,6 +494,7 @@ class Peer:
         '''
 
         if self.BALANCE >0 :
+
             upper_limit = 100 if self.BALANCE>100 else self.BALANCE
             money_to_send = random.randint(0,100)
             peer_choices = list(self.PEER_LIST.keys())
@@ -426,7 +514,9 @@ class Peer:
             self.BALANCE -= money_to_send
 
             send_sock.close()
-            #print("Sent {} to {}. Now Balance : {}".format(money_to_send, peer_choice, self.BALANCE))
+            str1 = "Sent {} to {}".format(money_to_send, peer_choice)
+            str2 = "Now Balance : {}".format(self.BALANCE)
+            print("{:<50} \t {:<20}".format(str1, str2))
             time.sleep(1)
             #Do it again..
             self.send_money()
@@ -448,16 +538,25 @@ def produce_snapshots_every_two_seconds(peer):
         peer.initiate_snapsot(marker)
         time.sleep(2)
 
-
 if __name__ == '__main__':
-    peer = Peer()
-    while True:
-        n = input()
-        if n == '1':
-            thread = threading.Thread(target = produce_snapshots_every_two_seconds, args = [peer], daemon = True)
-            thread.start()
+    
+    try:
+        
+        peer = Peer()
+        while True:
+            n = input()
+            if n == '1':
+                thread = threading.Thread(target = produce_snapshots_every_two_seconds, args = [peer], daemon = True)
+                thread.start()
 
+    except KeyboardInterrupt as ky:
+        peer.send_exit()
+        print("Exiting..")
+        
+    except ConnectionRefusedError : 
+        print("Exiting..")
 
+    
 
 
 
